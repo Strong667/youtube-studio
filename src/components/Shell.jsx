@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useYouTube } from './YouTubeContext'
 import { Avatar } from './Avatar'
+import AuthScreen from './AuthScreen'
 
 const links = [
   { href: '/', label: 'Панель', icon: '▦' },
@@ -48,6 +49,10 @@ export default function Shell({ children }) {
   const { channel, mode, error, clearError } = useYouTube()
   const [open, setOpen] = useState(false)
 
+  // Пока не вошли — вместо админки показываем экран входа.
+  if (mode === 'loading') return <div className="auth-page muted">Загрузка…</div>
+  if (mode === 'locked') return <AuthScreen />
+
   return (
     <div className="app">
       <aside className={`sidebar ${open ? 'open' : ''}`}>
@@ -79,7 +84,7 @@ export default function Shell({ children }) {
           {mode === 'google' ? (
             <span className="badge badge-ok">● YouTube подключён</span>
           ) : (
-            <Link href="/settings" className="badge">Демо-режим · подключить канал</Link>
+            <Link href="/settings" className="badge">Демо-режим · сервер не настроен</Link>
           )}
         </header>
         <main className="content">

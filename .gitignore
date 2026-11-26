@@ -43,3 +43,6 @@ next-env.d.ts
 
 # local Claude Code config
 .claude/
+
+# encrypted server store (tokens, Authenticator secret)
+.data/

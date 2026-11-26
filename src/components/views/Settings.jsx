@@ -8,29 +8,17 @@ const noop = () => () => {}
 export default function Settings() {
   const yt = useYouTube()
   const origin = useSyncExternalStore(noop, () => window.location.origin, () => '')
-  const [draftId, setDraftId] = useState(null) // null — показываем сохранённое значение
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
 
-  const shownId = draftId ?? yt.clientId
-
-  const connect = async () => {
+  const run = async (fn) => {
     setBusy(true)
-    setMessage('')
     try {
-      await yt.signIn()
+      await fn()
     } catch (e) {
-      setMessage(e.message)
+      alert(e.message)
     } finally {
       setBusy(false)
     }
-  }
-
-  const saveId = (e) => {
-    e.preventDefault()
-    yt.setClientId(shownId)
-    setDraftId(null)
-    setMessage('Client ID сохранён')
   }
 
   return (
@@ -39,70 +27,34 @@ export default function Settings() {
         <h1>Настройки</h1>
       </div>
 
-      <section className="card form narrow">
-        <div className="section-head">
-          <h2>Подключение к YouTube</h2>
-          <span className={`pill ${yt.mode === 'google' ? 'pill-public' : 'pill-private'}`}>
-            {yt.mode === 'google' ? 'Подключено' : 'Не подключено'}
-          </span>
-        </div>
-
-        {yt.mode === 'google' ? (
-          <>
-            <p>
-              Подключён канал <b>{yt.channel?.title}</b>. Все изменения сразу применяются на YouTube.
-            </p>
-            <div className="row">
-              <button className="btn" onClick={yt.refresh}>Обновить данные</button>
-              <button className="btn danger" onClick={yt.signOut}>Отключить</button>
-            </div>
-          </>
-        ) : (
-          <>
-            {!yt.clientIdFromEnv && (
-              <form className="field" onSubmit={saveId}>
-                <span>OAuth Client ID</span>
-                <div className="row">
-                  <input
-                    className="input grow"
-                    placeholder="123456789-abc.apps.googleusercontent.com"
-                    value={shownId}
-                    onChange={(e) => setDraftId(e.target.value)}
-                  />
-                  <button className="btn" disabled={draftId === null}>Сохранить</button>
-                </div>
-              </form>
-            )}
-            <div>
-              <button className="btn btn-primary" onClick={connect} disabled={!yt.clientId || busy}>
-                {busy ? 'Ожидание входа…' : 'Войти через Google'}
-              </button>
-            </div>
-          </>
-        )}
-        {message && <p className="muted small">{message}</p>}
-      </section>
-
-      <section className="card form narrow">
-        <h2>Как получить Client ID</h2>
-        <ol className="steps">
-          <li>
-            Откройте <a className="link" href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud Console</a> и создайте проект.
-          </li>
-          <li>
-            В разделе <b>APIs &amp; Services → Library</b> найдите и включите <b>YouTube Data API v3</b>.
-          </li>
-          <li>
-            В <b>OAuth consent screen</b> выберите тип <b>External</b>, заполните название и добавьте свой
-            Gmail в <b>Test users</b>.
-          </li>
-          <li>
-            В <b>Credentials → Create credentials → OAuth client ID</b> выберите <b>Web application</b> и в{' '}
-            <b>Authorized JavaScript origins</b> добавьте адрес: <code>{origin || 'http://localhost:3100'}</code>
-          </li>
-          <li>Скопируйте Client ID и вставьте его выше (или в файл <code>.env.local</code>).</li>
-        </ol>
-      </section>
+      {yt.mode === 'google' ? (
+        <section className="card form narrow">
+          <div className="section-head">
+            <h2>Подключение к YouTube</h2>
+            <span className="pill pill-public">Подключено</span>
+          </div>
+          <p>
+            {yt.channel && <>Канал <b>{yt.channel.title}</b>, </>}аккаунт Google <b>{yt.auth?.email}</b>.
+            Доступ хранится на сервере и обновляется автоматически, вход — по коду Google Authenticator.
+          </p>
+          <div className="row wrap">
+            <button className="btn" disabled={busy} onClick={() => run(yt.refresh)}>Обновить данные</button>
+            <button className="btn" disabled={busy} onClick={() => run(yt.logout)}>Выйти на всех устройствах</button>
+            <button
+              className="btn danger"
+              disabled={busy}
+              onClick={() =>
+                confirm('Отключить канал? Доступ у Google будет отозван, Authenticator придётся привязать заново.') &&
+                run(yt.disconnect)
+              }
+            >
+              Отключить канал
+            </button>
+          </div>
+        </section>
+      ) : (
+        <ServerSetup missing={yt.auth?.missing ?? []} origin={origin} />
+      )}
 
       {yt.mode === 'demo' && (
         <section className="card form narrow">
@@ -116,5 +68,44 @@ export default function Settings() {
         </section>
       )}
     </>
+  )
+}
+
+function ServerSetup({ missing, origin }) {
+  const site = origin || 'http://localhost:3100'
+  return (
+    <section className="card form narrow">
+      <div className="section-head">
+        <h2>Настройка сервера</h2>
+        <span className="pill pill-private">Не настроено</span>
+      </div>
+      <p className="muted">
+        Сейчас работает демо-режим. Чтобы подключить настоящий канал, один раз настройте Google Cloud и файл{' '}
+        <code>.env.local</code> на сервере.
+      </p>
+      {missing.length > 0 && (
+        <p className="small">
+          Не заполнено: {missing.map((m) => <code key={m}>{m}</code>).reduce((a, b) => [a, ' ', b])}
+        </p>
+      )}
+      <ol className="steps">
+        <li>
+          Откройте <a className="link" href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud Console</a> и создайте проект.
+        </li>
+        <li>В <b>APIs &amp; Services → Library</b> включите <b>YouTube Data API v3</b>.</li>
+        <li>
+          В <b>OAuth consent screen</b> выберите <b>External</b>, заполните название и переведите приложение в{' '}
+          <b>In production</b> (в режиме Testing Google отзывает доступ каждые 7 дней).
+        </li>
+        <li>
+          В <b>Credentials → Create credentials → OAuth client ID</b> выберите <b>Web application</b> и добавьте в{' '}
+          <b>Authorized redirect URIs</b>: <code>{site}/api/auth/google/callback</code>
+        </li>
+        <li>
+          Впишите в <code>.env.local</code>: <code>GOOGLE_CLIENT_ID</code>, <code>GOOGLE_CLIENT_SECRET</code> и{' '}
+          <code>ADMIN_EMAIL</code> (ваш Gmail — войти сможет только он). Затем перезапустите сервер.
+        </li>
+      </ol>
+    </section>
   )
 }

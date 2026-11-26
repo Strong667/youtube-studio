@@ -1,111 +1,119 @@
 'use client'
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import * as demo from '@/lib/youtube'
-import { AuthError, createYouTubeApi } from '@/lib/youtubeApi'
-import * as auth from '@/lib/googleAuth'
+import { authApi, isAuthError, serverApi } from '@/lib/serverApi'
 
 const YouTubeContext = createContext(null)
 const demoApi = { mode: 'demo', ...demo }
 
-const apiFor = (token) => (token ? createYouTubeApi(token.access_token) : demoApi)
+// Режим приложения по ответу сервера:
+//   demo   — сервер не настроен (.env.local пуст), данные в браузере
+//   google — полный вход, данные настоящего канала
+//   locked — нужен вход (Google и/или код Authenticator)
+function modeFor(auth) {
+  if (!auth) return 'loading'
+  if (!auth.configured) return 'demo'
+  return auth.stage === 'full' ? 'google' : 'locked'
+}
 
-// Если сессия Google истекла — тихо возвращаемся к демо-данным с сообщением.
-async function fetchAll(token) {
+async function boot() {
+  let auth
   try {
-    const source = apiFor(token)
-    const [channel, videos] = await Promise.all([source.getChannel(), source.listVideos()])
-    return { token, channel, videos, error: null }
+    auth = await authApi.status()
   } catch (e) {
-    if (e instanceof AuthError) {
-      auth.clearStoredToken()
-      return { ...(await fetchAll(null)), error: e.message }
+    return { auth: null, channel: null, videos: [], error: `Сервер недоступен: ${e.message}` }
+  }
+  const mode = modeFor(auth)
+  if (mode === 'locked') return { auth, channel: null, videos: [], error: null }
+  const source = mode === 'google' ? serverApi : demoApi
+  try {
+    const [channel, videos] = await Promise.all([source.getChannel(), source.listVideos()])
+    return { auth, channel, videos, error: null }
+  } catch (e) {
+    if (isAuthError(e)) {
+      // сессия истекла или доступ Google отозван — показываем экран входа
+      return { auth: await authApi.status().catch(() => auth), channel: null, videos: [], error: e.message }
     }
-    return { token, channel: null, videos: [], error: e.message }
+    return { auth, channel: null, videos: [], error: e.message }
   }
 }
 
 export function YouTubeProvider({ children }) {
-  const [token, setToken] = useState(null)
+  const [auth, setAuth] = useState(null)
   const [channel, setChannel] = useState(null)
   const [videos, setVideos] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const clientId = useSyncExternalStore(auth.subscribeClientId, auth.getClientId, () => '')
-  const api = useMemo(() => apiFor(token), [token])
-
-  // Загружает канал и видео из нужного источника. setState вызывается
-  // только после await, чтобы не дёргать рендер синхронно из эффекта.
-  const loadAll = useCallback(async (tok) => {
-    const r = await fetchAll(tok)
-    setToken(r.token)
+  const apply = useCallback((r) => {
+    setAuth(r.auth)
     setChannel(r.channel)
     setVideos(r.videos)
     setError(r.error)
     setLoading(false)
   }, [])
 
-  // Первая загрузка: токен и демо-данные лежат в браузере, поэтому только на клиенте.
+  const reload = useCallback(async () => {
+    setLoading(true)
+    apply(await boot())
+  }, [apply])
+
   useEffect(() => {
     let alive = true
-    fetchAll(auth.getStoredToken()).then((r) => {
-      if (!alive) return
-      setToken(r.token)
-      setChannel(r.channel)
-      setVideos(r.videos)
-      setError(r.error)
-      setLoading(false)
-    })
+    boot().then((r) => alive && apply(r))
     return () => {
       alive = false
     }
-  }, [])
+  }, [apply])
 
-  // Заранее подгружаем библиотеку Google, чтобы окно входа открылось сразу по клику.
-  useEffect(() => {
-    if (clientId) auth.loadGis().catch(() => {})
-  }, [clientId])
+  const mode = modeFor(auth)
+  const api = mode === 'google' ? serverApi : demoApi
 
-  // Обёртка для изменений: при истёкшей сессии возвращаемся в демо-режим.
-  const guard = useCallback(
-    async (fn) => {
-      try {
-        return await fn()
-      } catch (e) {
-        if (e instanceof AuthError) {
-          auth.clearStoredToken()
-          await loadAll(null)
-        }
-        throw e
-      }
-    },
-    [loadAll],
-  )
+  // Обновить только данные канала (без смены режима).
+  const refresh = useCallback(async () => {
+    const [ch, vids] = await Promise.all([api.getChannel(), api.listVideos()])
+    setChannel(ch)
+    setVideos(vids)
+  }, [api])
 
-  const refresh = useCallback(() => loadAll(token), [loadAll, token])
+  // Изменения: при 401 возвращаемся к экрану входа.
+  const guard = async (fn) => {
+    try {
+      return await fn()
+    } catch (e) {
+      if (isAuthError(e)) await reload()
+      throw e
+    }
+  }
 
   const value = {
-    mode: api.mode,
+    mode,
+    auth,
     channel,
     videos,
     loading,
     error,
     clearError: () => setError(null),
-    refresh,
+    refresh: () => guard(refresh),
+    reload,
 
-    clientId,
-    clientIdFromEnv: auth.clientIdFromEnv,
-    setClientId: auth.setClientId,
-    signIn: async () => {
-      const tok = await auth.signIn()
-      setLoading(true)
-      await loadAll(tok)
+    // вход
+    verifyCode: async (code) => {
+      await authApi.verify(code)
+      await reload()
     },
-    signOut: async () => {
-      auth.signOut(token)
-      setLoading(true)
-      await loadAll(null)
+    resetTotp: async () => {
+      await authApi.resetTotp()
+      await reload()
+    },
+    logout: async () => {
+      await authApi.logout()
+      await reload()
+    },
+    disconnect: async () => {
+      await authApi.disconnect()
+      await reload()
     },
 
     canSetThumbnailFile: Boolean(api.setThumbnail),
@@ -137,7 +145,7 @@ export function YouTubeProvider({ children }) {
       }),
     resetDemo: async () => {
       demo.resetDemoData()
-      await loadAll(token)
+      await refresh()
     },
   }
 
